@@ -1,14 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Created on Wed Nov 19 22:36:48 2025
-
-@author: resulayberksahpaz
-"""
-
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""
 Created on Wed Nov 12 11:58:34 2025
 Author: Resul Ayberk Şahpaz (merged & debugged)
 Description: Hot Jupiter companion search pipeline with robust Gaia ID resolution
