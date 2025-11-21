@@ -2,8 +2,8 @@
 # -*- coding: utf-8 -*-
 """
 Created on Wed Nov 12 11:58:34 2025
-Author: Resul Ayberk Şahpaz (merged & debugged)
-Description: Hot Jupiter companion search pipeline with two CPM metrics
+Author: Resul Ayberk Şahpaz
+Description: Hot Jupiter companion search pipeline with CPM metrics + Parallax Distance & Agreement
 """
 
 from astroquery.nasa_exoplanet_archive import NasaExoplanetArchive
@@ -18,10 +18,34 @@ from uncertainties.umath import sqrt as usqrt
 # ==============================================================
 # 0. Ayarlar
 # ==============================================================
-Gaia.MAIN_GAIA_TABLE = "gaiadr3.gaia_source"  # just a reminder
+Gaia.MAIN_GAIA_TABLE = "gaiadr3.gaia_source"
 
 # ==============================================================
-# 1. GAIA ID SÜTUNUNU OTOMATİK BUL (güvenilir şekilde)
+# Parallax fonksiyonları
+# ==============================================================
+def parallax_distance(p, p_err):
+    """Parallax → distance (pc), ufloat ile (p mas)."""
+    if pd.isna(p) or p <= 0:
+        return np.nan
+    return (ufloat(p/1000.0, p_err/1000.0))**-1
+
+def parallax_difference(p1, p1_err, p2, p2_err):
+    try:
+        u1 = ufloat(p1, p1_err)
+        u2 = ufloat(p2, p2_err)
+        d = u1 - u2
+        return d.nominal_value, d.std_dev
+    except:
+        return np.nan, np.nan
+
+def parallax_agreement(p1, p1_err, p2, p2_err):
+    vals = [p1, p1_err, p2, p2_err]
+    if any(pd.isna(vals)):
+        return np.nan
+    return abs(p1 - p2) / np.sqrt(p1_err**2 + p2_err**2)
+
+# ==============================================================
+# 1. GAIA ID sütunu tespiti
 # ==============================================================
 print("🔍 NASA Exoplanet Archive sütunları inceleniyor...")
 
@@ -30,7 +54,6 @@ tbl = NasaExoplanetArchive.query_criteria(
     select="top 1 *"
 )
 
-# Orijinal isimleri alıp lower() ile kontrol et, ama sakla orijinal isim
 colnames = list(tbl.colnames)
 gaia_col = None
 for c in colnames:
@@ -41,10 +64,10 @@ for c in colnames:
 if gaia_col:
     print(f"✅ Gaia ID sütunu bulundu: {gaia_col}")
 else:
-    print("⚠️ Gaia ID sütunu bulunamadı, RA–Dec ile eşleştirme yapılacak.")
-#print(colnames)
+    print("⚠️ Gaia ID sütunu bulunamadı, RA/Dec ile eşleştirme yapılacak.")
+
 # ==============================================================
-# 2. SICAK JÜPİTERLERİ ÇEK
+# 2. Sıcak Jüpiterleri çek
 # ==============================================================
 print("\n🔭 Exoplanet Archive'dan sıcak Jüpiter sistemleri çekiliyor...")
 
@@ -62,13 +85,13 @@ hot_jupiters = hot_jupiters.dropna(subset=["ra", "dec"])
 print(f"→ {len(hot_jupiters)} adet sıcak Jüpiter bulundu.")
 
 # ==============================================================
-# 3. GAIA'DA YAKIN KAYNAKLARI ARA
+# 3. Gaia yakın kaynak araması
 # ==============================================================
 def search_gaia_nearby(ra, dec, radius_arcsec=5):
-    """Belirtilen RA/Dec çevresinde Gaia kaynaklarını getirir (pandas DataFrame)."""
     radius_deg = radius_arcsec / 3600.0
     query = f"""
-    SELECT source_id, ra, dec, parallax, pmra, pmdec, pmra_error, pmdec_error, phot_g_mean_mag
+    SELECT source_id, ra, dec, parallax, parallax_error,
+           pmra, pmra_error, pmdec, pmdec_error, phot_g_mean_mag
     FROM gaiadr3.gaia_source
     WHERE 1 = CONTAINS(
         POINT('ICRS', ra, dec),
@@ -76,38 +99,27 @@ def search_gaia_nearby(ra, dec, radius_arcsec=5):
     )
     """
     job = Gaia.launch_job_async(query, dump_to_file=False)
-    res = job.get_results()
-    return res.to_pandas()
+    return job.get_results().to_pandas()
 
 # ==============================================================
-# 4. AÇISAL AYRILIK (SkyCoord kullanarak) - consistent name
+# 4. Açısal ayrılık
 # ==============================================================
 def angular_sep(ra1, dec1, ra2, dec2):
-    """Açısal ayrımı (arcsec) hesaplar, SkyCoord ile."""
     c1 = SkyCoord(ra=ra1*u.deg, dec=dec1*u.deg)
     c2 = SkyCoord(ra=ra2*u.deg, dec=dec2*u.deg)
     return c1.separation(c2).arcsecond
 
 # ==============================================================
-# 5. CPM METRIKLERİ
-#    - simple_pm_diff: vektörel proper-motion farkının normu (mas/yr)
-#    - mugrauer_cpm: Mugrauer tarzı cpm-index (hata ile birlikte, ufloat)
+# 5. CPM metrikleri
 # ==============================================================
 def simple_pm_diff(pmra1, pmdec1, pmra2, pmdec2):
-    """Basit PM farkı (mas/yr) — vektör farkın büyüklüğü."""
     if any(pd.isna([pmra1, pmdec1, pmra2, pmdec2])):
         return np.nan
     return np.sqrt((pmra1 - pmra2)**2 + (pmdec1 - pmdec2)**2)
 
 def mugrauer_cpm(pmra1, pmra1_err, pmdec1, pmdec1_err,
                  pmra2, pmra2_err, pmdec2, pmdec2_err):
-    """
-    Mugrauer et al.-like CPM index:
-        pm1 = sqrt(pmra1^2 + pmdec1^2)
-        pm2 = sqrt(pmra2^2 + pmdec2^2)
-        cpm = (pm1 + pm2) / abs(pm1 - pm2)
-    Returns (cpm_nominal, cpm_std) or (None, None) if insufficient data.
-    """
+
     vals = [pmra1, pmra1_err, pmdec1, pmdec1_err, pmra2, pmra2_err, pmdec2, pmdec2_err]
     if any(pd.isna(vals)):
         return None, None
@@ -122,32 +134,17 @@ def mugrauer_cpm(pmra1, pmra1_err, pmdec1, pmdec1_err,
         pm2 = usqrt(p_ra2**2 + p_dec2**2)
 
         denom = abs(pm1 - pm2)
-        # avoid division by zero
         if denom.nominal_value == 0:
             return None, None
 
         cpm = (pm1 + pm2) / denom
         return cpm.nominal_value, cpm.std_dev
-    except Exception:
+
+    except:
         return None, None
 
 # ==============================================================
-# 6. Güvenli Gaia sorgulama: source_id ile sorgu, None dönerse uyarı ver
-# ==============================================================
-def query_gaia_source_safe(source_id):
-    adql = f"""
-    SELECT source_id, ra, dec, parallax, pmra, pmdec, pmra_error, pmdec_error, phot_g_mean_mag
-    FROM gaiadr3.gaia_source
-    WHERE source_id = {int(source_id)}
-    """
-    job = Gaia.launch_job(adql)
-    res = job.get_results()
-    if len(res) == 0:
-        return None
-    return res[0]
-
-# ==============================================================
-# 7. pipeline: sıcak Jüpiterler etrafında yakın kaynakları tara, iki CPM metriğini hesapla
+# 7. Ana pipeline döngüsü
 # ==============================================================
 results = []
 
@@ -167,71 +164,96 @@ for idx, row in hot_jupiters.iterrows():
         print(" → Yakın kaynak yok.")
         continue
 
-    nearby_count = len(nearby) - 1  # ana yıldız hariç
+    nearby_count = len(nearby) - 1
 
-    # primary seçimi: eğer exoplanet tablosunda bir Gaia ID varsa (gaia_col), ona göre seç; yoksa en parlakı al
+    # primary seçimi
     primary = None
     if gaia_col and gaia_col in row and not pd.isna(row[gaia_col]):
         try:
-            # bazen gaia_col bir string tipinde id içerir; güvenli int dönüşümü dene
-            primary_srcid = int(row[gaia_col])
-            match = nearby.loc[nearby["source_id"] == primary_srcid]
+            gid = int(row[gaia_col])
+            match = nearby.loc[nearby["source_id"] == gid]
             if len(match) > 0:
                 primary = match.iloc[0]
-        except Exception:
+        except:
             primary = None
 
     if primary is None:
-        # en parlak (en küçük G) kaydı ana kabul et
         primary = nearby.sort_values("phot_g_mean_mag").iloc[0]
 
-    # Komşular için CPM hesabı
+    # NASA tablosundan gelen GAIA DR3 ID (sadece primary için)
+    primary_dr3_id = row.get(gaia_col, np.nan)
+
+    # ----------------------------------------------------------
+    #   Candidate loop + PARALLAX ENTEGRASYONU
+    # ----------------------------------------------------------
     for _, cand in nearby.iterrows():
         if int(cand["source_id"]) == int(primary["source_id"]):
             continue
 
-        # açısal ayrılık
         sep_arcsec = angular_sep(primary["ra"], primary["dec"], cand["ra"], cand["dec"])
 
-        # simple pm diff
-        pm_diff = simple_pm_diff(primary.get("pmra"), primary.get("pmdec"),
-                                 cand.get("pmra"), cand.get("pmdec"))
+        pm_diff = simple_pm_diff(primary["pmra"], primary["pmdec"],
+                                 cand["pmra"], cand["pmdec"])
 
-        # mugrauer style cpm (with errors)
         cpm_val, cpm_err = mugrauer_cpm(
-            primary.get("pmra"), primary.get("pmra_error"),
-            primary.get("pmdec"), primary.get("pmdec_error"),
-            cand.get("pmra"), cand.get("pmra_error"),
-            cand.get("pmdec"), cand.get("pmdec_error"),
+            primary["pmra"], primary["pmra_error"],
+            primary["pmdec"], primary["pmdec_error"],
+            cand["pmra"], cand["pmra_error"],
+            cand["pmdec"], cand["pmdec_error"],
         )
 
-        # seçim kriteri: örnek olarak simple pm_diff < 5 mas/yr ekliyoruz
-        # ayrıca Mugrauer cpm varsa onu da kaydet
+        # PARALLAX
+        dist_primary = parallax_distance(primary["parallax"], primary["parallax_error"])
+        dist_cand = parallax_distance(cand["parallax"], cand["parallax_error"])
+
+        par_diff, par_diff_err = parallax_difference(
+            primary["parallax"], primary["parallax_error"],
+            cand["parallax"], cand["parallax_error"]
+        )
+
+        par_sigma = parallax_agreement(
+            primary["parallax"], primary["parallax_error"],
+            cand["parallax"], cand["parallax_error"]
+        )
+
+        # ekleme kriteri
         if np.isfinite(pm_diff) and pm_diff < 5:
             results.append({
                 "host": hostname,
                 "planet": pl_name,
+
                 "primary_gaia": int(primary["source_id"]),
                 "candidate_gaia": int(cand["source_id"]),
+
+                "primary_gaia_dr3_id": primary_dr3_id,
+                "candidate_gaia_dr3_id": np.nan,
+
                 "sep_arcsec": sep_arcsec,
                 "pm_diff_masyr": pm_diff,
                 "mugrauer_cpm": cpm_val,
                 "mugrauer_cpm_err": cpm_err,
+                "dist_primary_pc": dist_primary,
+                "dist_candidate_pc": dist_cand,
+                "parallax_diff_mas": par_diff,
+                "parallax_diff_err": par_diff_err,
+                "parallax_sigma_agreement": par_sigma,
                 "nearby_count": nearby_count
             })
 
-    print(f" → {nearby_count} komşu bulundu, olası CPM eşleşmeleri eklendi.")
+    print(f" → {nearby_count} komşu bulundu, olası CPM-parallax eşleşmeleri eklendi.")
 
 # ==============================================================
-# 8. SONUÇLAR ve KAYIT
+# 8. Sonuç
 # ==============================================================
 df = pd.DataFrame(results)
 if not df.empty:
-    df = df.sort_values(by=["mugrauer_cpm", "pm_diff_masyr"], na_position="last")
+    df = df.sort_values(by=["parallax_sigma_agreement", "pm_diff_masyr"], na_position="last")
+
 print("\n✅ Analiz tamamlandı!")
-print(f"Toplam olası bağlı aday sayısı: {len(df)}")
+print(f"Toplam olası eşleşme: {len(df)}")
 print(df.head(10))
 
-output_file = "hot_jupiter_cpm_candidates_corrected.csv"
+output_file = "hot_jupiter_cpm_parallax_candidates.csv"
 df.to_csv(output_file, index=False)
-print(f"💾 Olası bağlı adaylar ve yakın cisim sayıları '{output_file}' dosyasına kaydedildi.")
+print(f"💾 Sonuçlar '{output_file}' dosyasına kaydedildi.")
+
