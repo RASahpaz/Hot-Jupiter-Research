@@ -124,6 +124,7 @@ def get_candidate_dr3_id(candidate_source_id):
 
 # ---------------- Ana pipeline ----------------
 results = []
+no_nearby_list = []   # <--- YENİ EKLENDİ
 
 print("🌌 Companion araması başlıyor...")
 print("------------------------------------------------------------")
@@ -143,6 +144,15 @@ for idx,row in hot_jupiters.iterrows():
 
     if len(nearby)<=1:
         print("   ⚠️ Bu sistemde başka Gaia kaynağı yok.")
+
+        no_nearby_list.append({
+            "host": hostname,
+            "planet": pl_name,
+            "ra": row["ra"],
+            "dec": row["dec"],
+            "gaia_dr3_id": row.get(gaia_col, np.nan),
+            "nearby_sources": 0
+        })
         continue
 
     nearby_count = len(nearby)-1
@@ -192,7 +202,7 @@ for idx,row in hot_jupiters.iterrows():
 
         candidate_dr3_id = get_candidate_dr3_id(cand["source_id"])
 
-        if np.isfinite(pm_diff) and pm_diff<5:
+        if np.isfinite(pm_diff) and pm_diff < 5:
             print("      ✅ CPM ADAYI BULUNDU!")
             results.append({
                 "host": hostname,
@@ -213,7 +223,7 @@ for idx,row in hot_jupiters.iterrows():
         else:
             print("      ❌ CPM uyumsuz — aday elendi.")
 
-# ---------------- Sonuç ----------------
+# ---------------- Sonuçlar ----------------
 df = pd.DataFrame(results)
 if not df.empty:
     df = df.sort_values(by=["parallax_sigma_agreement","pm_diff_masyr"],na_position="last")
@@ -221,6 +231,12 @@ if not df.empty:
 output_file = "hot_jupiter_cpm_parallax_candidates_gaia_dr3.csv"
 df.to_csv(output_file,index=False)
 
+# ---- Yakında Gaia kaynağı olmayanlar için ayrı CSV ----
+df_no = pd.DataFrame(no_nearby_list)
+output_file_no = "hot_jupiter_no_nearby_gaia.csv"
+df_no.to_csv(output_file_no, index=False)
+
 print("\n------------------------------------------------------------")
-print(f"💾 Sonuçlar '{output_file}' dosyasına kaydedildi.")
+print(f"💾 CPM sonuçları '{output_file}' dosyasına kaydedildi.")
+print(f"💾 Yakın Gaia kaynağı olmayan sistemler '{output_file_no}' dosyasına kaydedildi.")
 print("🌠 Pipeline tamamlandı — yıldızlar usulca yerine yerleşti.")
