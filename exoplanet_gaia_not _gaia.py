@@ -16,6 +16,9 @@ from uncertainties.umath import sqrt as usqrt
 
 Gaia.MAIN_GAIA_TABLE = "gaiadr3.gaia_source"
 
+print("🚀 Pipeline başlatılıyor...")
+print("------------------------------------------------------------")
+
 # ---------------- Parallax fonksiyonları ----------------
 def parallax_distance(p, p_err):
     if pd.isna(p) or p <= 0:
@@ -38,11 +41,15 @@ def parallax_agreement(p1, p1_err, p2, p2_err):
     return abs(p1 - p2) / np.sqrt(p1_err**2 + p2_err**2)
 
 # ---------------- NASA GAIA sütunu tespiti ----------------
+print("🔭 NASA Exoplanet Archive sorgulanıyor...")
 tbl = NasaExoplanetArchive.query_criteria(table="pscomppars", select="top 1 *")
 colnames = list(tbl.colnames)
 gaia_col = "gaia_dr3_id" if "gaia_dr3_id" in colnames else None
+print(f"➡️ GAIA DR3 kolonu: {gaia_col}")
 
 # ---------------- Sıcak Jüpiterleri çek ----------------
+print("🔥 Hot Jupiter sistemleri çekiliyor...")
+
 select_fields = ["pl_name","hostname","pl_orbper","pl_bmassj","ra","dec"]
 if gaia_col:
     select_fields.append(gaia_col)
@@ -54,9 +61,13 @@ hot_jupiters = NasaExoplanetArchive.query_criteria(
 ).to_pandas()
 hot_jupiters = hot_jupiters.dropna(subset=["ra","dec"])
 
+print(f"➡️ Bulunan Hot Jupiter sayısı: {len(hot_jupiters)}")
+print("------------------------------------------------------------")
+
 # ---------------- Gaia yakın kaynak araması ----------------
 def search_gaia_nearby(ra, dec, radius_arcsec=5):
     radius_deg = radius_arcsec / 3600.0
+    print(f"   🔍 Gaia yakın kaynak araması: RA={ra:.5f}, DEC={dec:.5f}")
     query = f"""
     SELECT source_id, ra, dec, parallax, parallax_error,
            pmra, pmra_error, pmdec, pmdec_error, phot_g_mean_mag
@@ -98,8 +109,9 @@ def mugrauer_cpm(pmra1, pmra1_err, pmdec1, pmdec1_err,
 
 # ---------------- Candidate Gaia DR3 ID kontrolü ----------------
 def get_candidate_dr3_id(candidate_source_id):
+    candidate_source_id = int(candidate_source_id)
+    print(f"      📡 Gaia DR3 ID kontrolü: {candidate_source_id}")
     try:
-        candidate_source_id = int(candidate_source_id)
         query = f"SELECT source_id FROM gaiadr3.gaia_source WHERE source_id = {candidate_source_id}"
         job = Gaia.launch_job_async(query, dump_to_file=False)
         res = job.get_results()
@@ -113,17 +125,25 @@ def get_candidate_dr3_id(candidate_source_id):
 # ---------------- Ana pipeline ----------------
 results = []
 
+print("🌌 Companion araması başlıyor...")
+print("------------------------------------------------------------")
+
 for idx,row in hot_jupiters.iterrows():
     hostname = row.get("hostname","")
     pl_name = row.get("pl_name","")
-    
+    print(f"\n⭐ {idx+1}/{len(hot_jupiters)} → {hostname} / {pl_name}")
+
     try:
         nearby = search_gaia_nearby(row["ra"],row["dec"],radius_arcsec=5)
     except Exception as e:
-        print(f"❌ Gaia sorgusu başarısız: {e}")
+        print(f"   ❌ Gaia sorgusu başarısız: {e}")
         continue
 
-    if len(nearby)<=1: continue
+    print(f"   ➡️ Yakın kaynak sayısı: {len(nearby)}")
+
+    if len(nearby)<=1:
+        print("   ⚠️ Bu sistemde başka Gaia kaynağı yok.")
+        continue
 
     nearby_count = len(nearby)-1
 
@@ -133,15 +153,24 @@ for idx,row in hot_jupiters.iterrows():
         try:
             gid = int(row[gaia_col])
             match = nearby.loc[nearby["source_id"]==gid]
-            if len(match)>0: primary = match.iloc[0]
-        except: primary=None
-    if primary is None: primary = nearby.sort_values("phot_g_mean_mag").iloc[0]
+            if len(match)>0: 
+                primary = match.iloc[0]
+                print(f"   🌐 Primary GAIA eşleşti: {gid}")
+        except:
+            primary=None
+
+    if primary is None:
+        primary = nearby.sort_values("phot_g_mean_mag").iloc[0]
+        print(f"   🌐 Primary seçildi (en parlak yıldız): {int(primary['source_id'])}")
 
     primary_dr3_id = row.get(gaia_col,np.nan)
 
     # Candidate loop
     for _,cand in nearby.iterrows():
-        if int(cand["source_id"])==int(primary["source_id"]): continue
+        if int(cand["source_id"])==int(primary["source_id"]):
+            continue
+
+        print(f"   ➕ Aday inceleniyor: {int(cand['source_id'])}")
 
         sep_arcsec = angular_sep(primary["ra"],primary["dec"],cand["ra"],cand["dec"])
         pm_diff = simple_pm_diff(primary["pmra"],primary["pmdec"],cand["pmra"],cand["pmdec"])
@@ -164,11 +193,10 @@ for idx,row in hot_jupiters.iterrows():
         candidate_dr3_id = get_candidate_dr3_id(cand["source_id"])
 
         if np.isfinite(pm_diff) and pm_diff<5:
+            print("      ✅ CPM ADAYI BULUNDU!")
             results.append({
                 "host": hostname,
                 "planet": pl_name,
-                #"primary_gaia": int(primary["source_id"]),
-                #"candidate_gaia": int(cand["source_id"]),
                 "primary_gaia_dr3_id": primary_dr3_id,
                 "candidate_gaia_dr3_id": candidate_dr3_id,
                 "sep_arcsec": sep_arcsec,
@@ -182,6 +210,8 @@ for idx,row in hot_jupiters.iterrows():
                 "parallax_sigma_agreement": par_sigma,
                 "nearby_count": nearby_count
             })
+        else:
+            print("      ❌ CPM uyumsuz — aday elendi.")
 
 # ---------------- Sonuç ----------------
 df = pd.DataFrame(results)
@@ -190,5 +220,7 @@ if not df.empty:
 
 output_file = "hot_jupiter_cpm_parallax_candidates_gaia_dr3.csv"
 df.to_csv(output_file,index=False)
-print(f"💾 Sonuçlar '{output_file}' dosyasına kaydedildi.")
 
+print("\n------------------------------------------------------------")
+print(f"💾 Sonuçlar '{output_file}' dosyasına kaydedildi.")
+print("🌠 Pipeline tamamlandı — yıldızlar usulca yerine yerleşti.")
